@@ -2,7 +2,7 @@ import random
 import time
 import uuid
 from playwright.sync_api import sync_playwright
-from utils import remove_duplicate_lines, normalize_text, load_processed, save_processed
+from utils import remove_duplicate_lines, normalize_text, load_processed, save_processed, save_to_excel
 from config import *
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from keywords_handler import load_keywords
@@ -10,6 +10,7 @@ from telegram.helpers import escape_markdown
 from state import pending_comments, pending_messages
 import threading
 from handlers import *
+
 def extract_post_text(post):
     """
     يستخرج نص المنشور فقط، ويضغط على زر "عرض المزيد" أو "See more" إذا وجدهما تماماً.
@@ -125,7 +126,6 @@ def extract_poster_profile(post):
 
 processed_links, processed_texts = load_processed()
 # --- دالة استخراج البروفايل (كما هي من الكود الأصلي) ---
- 
 def watch_groups(bot, account_key, storage_file):
     print(f"👀 بدء المراقبة بـ {account_key}")
     
@@ -135,14 +135,18 @@ def watch_groups(bot, account_key, storage_file):
     while True:
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=False) # (اجعلها True للتشغيل في الخلفية)
+                # تشغيل المتصفح (Headless=False لرؤية ما يحدث، اجعليها True لاحقاً)
+                browser = p.chromium.launch(headless=False) 
                 context = browser.new_context(
                     storage_state=storage_file,
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
                 )
                 page = context.new_page()
-                page.goto("https://www.facebook.com/groups/feed", timeout=50000)
+                
+                print("🌍 الذهاب إلى صفحة Feed...")
+                page.goto("https://www.facebook.com/", timeout=60000)
 
+                # 1. التحقق من تسجيل الدخول
                 if page.url.startswith("https://www.facebook.com/login") or \
                    "checkpoint" in page.url or \
                    "recover" in page.url or \
@@ -157,116 +161,122 @@ def watch_groups(bot, account_key, storage_file):
                     browser.close()
                     break 
 
-                page.wait_for_selector('div[role="feed"]', timeout=50000)
+                # انتظار تحميل الـ Feed
+                try:
+                    page.wait_for_selector('div[role="feed"]', timeout=60000)
+                except:
+                    print("⚠️ لم يتم العثور على Feed، محاولة تخطي...")
+
                 session_start_time = time.time()
                 
+                # ✅✅✅ التصحيح هنا: تعريف متغيرات الوقت قبل الدخول في اللوب ✅✅✅
+                last_reload_time = time.time()
+                current_reload_interval = random.randint(300, 600) # بين 5 و 10 دقائق
+                print(f"⏱️ التوقيت العشوائي الأول للريلود: بعد {int(current_reload_interval/60)} دقيقة.")
+                # --------------------------------------------------------------
+
                 while True:
                     try:
-                        now = time.time()
-                        page.wait_for_timeout(random.randint(10000, 15000))    
+                        page.wait_for_timeout(random.randint(5000, 10000))    
                         keywords = load_keywords()
 
-                        if do_scroll:
-                            print("📜 Scrolling to load new posts...")
-                            page.evaluate("window.scrollBy(0, window.innerHeight * 2);")
-                            page.wait_for_timeout(random.randint(10000, 20000)) 
+                        # ✅ 2. التحقق من مرور الوقت لعمل Reload
+                        time_passed = time.time() - last_reload_time
+                        
+                        if time_passed > current_reload_interval:
+                            print(f"⏰ مرت {int(time_passed/60)} دقيقة. جاري تحديث الصفحة...")
+                            try:
+                                page.reload(timeout=60000)
+                                page.wait_for_selector('div[role="feed"]', timeout=60000) 
+                                print("✅ تم تحديث الصفحة بنجاح.")
+                                
+                                # إعادة ضبط المؤقت وتوليد وقت عشوائي جديد
+                                last_reload_time = time.time()
+                                current_reload_interval = random.randint(300, 600)
+                                print(f"🎲 الموعد القادم للريلود بعد: {int(current_reload_interval/60)} دقيقة.")
+                                
+                                do_scroll = True
+                                page.wait_for_timeout(5000)
+                            except Exception as e:
+                                print(f"⚠️ فشل الريلود: {e}")
 
+                        # ✅ 3. السكرول لتحميل بوستات جديدة
+                        if do_scroll:
+                            print("📜 Scrolling...")
+                            page.evaluate("window.scrollBy(0, window.innerHeight * 2);")
+                            page.wait_for_timeout(random.randint(3000, 6000)) 
+
+                        # ✅ 4. استخراج البوستات
                         feed = page.locator('div[role="feed"] div[role="article"]')
                         post_count = feed.count()
-                        print(f"🕵️ جاري فحص {post_count} بوست تم تحميله...")
+                        # print(f"🕵️ فحص {post_count} بوست...")
                         
-                        new_posts_found = 0
                         for i in range(post_count):
                             post = feed.nth(i)
                             full_link = ""
                             
                             try:
+                                # استخراج الرابط
                                 link_el = post.locator('a[href*="/posts/"], a[href*="/permalink/"]').first
-                                href = link_el.get_attribute("href", timeout=3000) or "" 
-                                if not href:
-                                    continue 
+                                href = link_el.get_attribute("href", timeout=1000) or "" 
+                                if not href: continue 
                                 href = href.split('?', 1)[0]
                                 full_link = href if href.startswith("http") else f"https://www.facebook.com{href}"
-                            except Exception:
+                            except:
                                 continue 
 
                             if full_link in processed_links or full_link in seen_links:
                                 continue 
 
-                            print(f"✨ تم رصد بوست جديد: {full_link}")
+                            # إضافة للروابط المرئية مؤقتاً لتجنب التكرار في نفس الجلسة
                             seen_links.add(full_link)
 
+                            # استخراج النص
                             text = extract_post_text(post)
                             text = remove_duplicate_lines(text)
                             norm_text = normalize_text(text)
 
                             if not text or norm_text in processed_texts:
-                                print(f"🚫 نص مكرر أو فارغ. تخطي: {full_link}")
                                 continue
 
+                            # التحقق من الكلمات المفتاحية
                             if not any(k in norm_text for k in keywords):
-                                print(f"🚫 لا توجد كلمات مفتاحية. تخطي: {full_link}")
                                 continue
 
-                            # (الخطوة 6: البوست مطابق - أرسله وابدأ الأتمتة)
-                            profile_url = extract_poster_profile(post)
-                            print(f"🚨🚨🚨 إرسال بوست لتيليجرام: {full_link}")
+                            # ✅ 5. إرسال التنبيه
+                            print(f"🚨 بوست مطابق: {full_link}")
                             
-                            # (هذا هو المكان الصحيح للعداد)
-                            new_posts_found += 1
-                            
-
                             MAX_TEXT_LENGTH = 4000
                             safe_text = (text[:MAX_TEXT_LENGTH] + '...') if len(text) > MAX_TEXT_LENGTH else text
                             escaped_text = escape_markdown(safe_text, version=2)
                             escaped_link = escape_markdown(full_link, version=2)
                            
-                            msg = f"📢 *بوست جديد من فيسبوك*\n\n{escaped_text}\n\n[عرض على فيسبوك]({escaped_link})" 
+                            msg = f"📢 *بوست جديد*\n\n{escaped_text}\n\n[عرض على فيسبوك]({escaped_link})" 
 
-                            # --- (هذا هو الكود الصحيح لبدء الأتمتة) ---
-                            
-                            # 1. إرسال الإشعار لتيليجرام (بدون أزرار)
                             bot.send_message(
                                 TELEGRAM_CHAT_ID,
                                 msg,
                                 parse_mode="MarkdownV2",
                                 disable_web_page_preview=True
                             )
-                            
-                            # 2. إرسال رسالة تأكيد ببدء الأتمتة
-                            bot.send_message(
-                                TELEGRAM_CHAT_ID,
-                                f"🤖 تم رصد البوست. جاري بدء عملية التعليق وإرسال الرسائل تلقائياً باستخدام كل الحسابات..."
-                            )
+                            save_to_excel(full_link, text) 
 
-                            # 3. بدء (Thread) جديد لتنفيذ المهام الآلية في الخلفية
-                            action_thread = threading.Thread(
-                                target=perform_automated_actions,
-                                args=(bot, full_link, profile_url),
-                                daemon=True 
-                            )
-                            action_thread.start()
-                            
-                            # ------------------------------------
-
+                            # الحفظ لتجنب التكرار مستقبلاً
                             processed_links.add(full_link)
                             processed_texts.add(norm_text)
                             save_processed(processed_links, processed_texts)
                         
-                        print(f"✅ انتهى الفحص. {new_posts_found} بوست جديد تم إرساله.")
-                        
+                        # ✅ 6. التحقق من مدة الجلسة (3 ساعات)
                         if time.time() - session_start_time > (3 * 60 * 60): 
-                            print("🔁 إعادة تشغيل المتصفح بعد 3 ساعات لتحديث الجلسة...")
+                            print("🔁 إعادة تشغيل المتصفح لتجديد الجلسة...")
                             break 
 
-                        page.wait_for_timeout(10000)
-
                     except Exception as inner_e:
-                        print(f"⚠️ خطأ أثناء الدورة الداخلية للمراقبة: {inner_e}")
-                        time.sleep(10)
-                        break 
+                        print(f"⚠️ خطأ عابر: {inner_e}")
+                        time.sleep(5)
+                        # لا نكسر اللوب هنا، نستمر للمحاولة التالية
 
         except Exception as outer_e:
-            print(f"❌ فشل فتح المتصفح أو انهياره: {outer_e}")
+            print(f"❌ خطأ في المتصفح: {outer_e}")
             print("🔁 إعادة المحاولة بعد 30 ثانية...")
             time.sleep(30)

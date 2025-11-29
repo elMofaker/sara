@@ -1,6 +1,8 @@
 import json
 import os
 from config import   PROCESSED_FILE
+import openpyxl
+from datetime import datetime
 
 def remove_duplicate_lines(text):
     seen = set()
@@ -34,3 +36,39 @@ def save_processed(links, texts):
             "texts": list(texts)
         }
         json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+
+
+EXCEL_FILE = "facebook_posts.xlsx"
+
+def save_to_excel(link, text):
+    """
+    دالة لحفظ رابط البوست والنص وتوقيت الحفظ في ملف إكسيل.
+    """
+    try:
+   
+        if not os.path.exists(EXCEL_FILE):
+             
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Posts"
+            ws.append(["Date", "Post Link", "Post Text"])  
+        else:
+          
+            wb = openpyxl.load_workbook(EXCEL_FILE)
+            ws = wb.active
+
+     
+        date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+       
+        safe_text = str(text).replace('\x00', '') 
+
+  
+        ws.append([date_now, link, safe_text])
+
+   
+        wb.save(EXCEL_FILE)
+        print(f"📝 تم حفظ البوست في الإكسيل: {link}")
+
+    except Exception as e:
+        print(f"❌ خطأ أثناء الحفظ في الإكسيل: {e}")
